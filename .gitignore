@@ -48,6 +48,33 @@ coverage.xml
 *.cover
 *.py.cover
 .hypothesis/
+
+# Data files (exclude from version control)
+data/
+*.csv
+*.pkl
+*.graphml
+*.gz
+*.json
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# NLP Models (large files)
+models/
+*.model
+*.bin
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
 .pytest_cache/
 cover/
 

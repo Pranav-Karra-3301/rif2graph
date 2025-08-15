@@ -1,0 +1,89 @@
+name: Update Gene-RIF Graph
+
+on:
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      species:
+        description: 'Species to process (human/all)'
+        required: false
+        default: 'human'
+      max_texts:
+        description: 'Maximum texts to process (for testing)'
+        required: false
+        default: ''
+
+jobs:
+  update-graph:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install uv
+      run: curl -LsSf https://astro.github.io/uv/install.sh | sh
+    
+    - name: Install dependencies
+      run: |
+        uv venv .venv
+        source .venv/bin/activate
+        uv pip install -r requirements.txt
+        # Install SpaCy models
+        python -m spacy download en_core_web_sm
+        pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.3/en_ner_bc5cdr_md-0.5.3.tar.gz
+    
+    - name: Set up environment variables
+      run: |
+        echo "NCBI_EMAIL=${{ secrets.NCBI_EMAIL }}" >> $GITHUB_ENV
+        echo "NCBI_API_KEY=${{ secrets.NCBI_API_KEY }}" >> $GITHUB_ENV
+        echo "SPECIES=${{ github.event.inputs.species || 'human' }}" >> $GITHUB_ENV
+        echo "MAX_TEXTS=${{ github.event.inputs.max_texts }}" >> $GITHUB_ENV
+        echo "DEVICE=cpu" >> $GITHUB_ENV
+    
+    - name: Create data directories
+      run: |
+        mkdir -p data/raw data/processed data/graphs
+    
+    - name: Run update pipeline
+      run: |
+        source .venv/bin/activate
+        ./update.sh
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: gene-rif-graphs
+        path: |
+          data/graphs/
+          data/processed/*.csv
+        retention-days: 30
+    
+    - name: Create release (if main branch)
+      if: github.ref == 'refs/heads/main'
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: release-${{ github.run_number }}
+        release_name: Gene-RIF Graph Release ${{ github.run_number }}
+        body: |
+          Automated release of Gene-RIF knowledge graphs.
+          
+          Generated on: ${{ github.event.head_commit.timestamp }}
+          Species: ${{ env.SPECIES }}
+          
+          Files included:
+          - Bipartite gene-function graph
+          - Gene and function projections
+          - Community analysis
+          - Summary statistics
+        draft: false
+        prerelease: false

@@ -1,0 +1,60 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install uv
+      run: curl -LsSf https://astro.github.io/uv/install.sh | sh
+    
+    - name: Install dependencies
+      run: |
+        uv venv .venv
+        source .venv/bin/activate
+        uv pip install -r requirements.txt
+        uv pip install -r requirements-dev.txt
+    
+    - name: Lint with ruff
+      run: |
+        source .venv/bin/activate
+        ruff check src/ tests/
+    
+    - name: Check formatting with black
+      run: |
+        source .venv/bin/activate
+        black --check src/ tests/
+    
+    - name: Type check with mypy
+      run: |
+        source .venv/bin/activate
+        mypy src/gene_rif_graph/
+    
+    - name: Run tests
+      run: |
+        source .venv/bin/activate
+        pytest tests/ --cov=src/gene_rif_graph --cov-report=xml --cov-report=term-missing
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
