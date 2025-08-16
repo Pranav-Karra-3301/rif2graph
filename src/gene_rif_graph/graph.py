@@ -61,21 +61,29 @@ class GraphBuilder:
         function_nodes = set()
         
         for rel in relations:
-            subject = rel['subject']
-            obj = rel['object']
-            predicate = rel['predicate']
-            confidence = rel.get('confidence', 1.0)
+            # Handle both nested dict format and flat CSV format
+            if 'subject' in rel and isinstance(rel['subject'], dict):
+                # Nested format
+                subject = rel['subject']
+                obj = rel['object']
+                predicate = rel['predicate']
+                confidence = rel.get('confidence', 1.0)
+                
+                subj_text = subject.get('normalized_text', subject['text'])
+                obj_text = obj.get('normalized_text', obj['text'])
+                subj_label = subject['label']
+                obj_label = obj['label']
+            else:
+                # Flat CSV format
+                subj_text = rel['subject_text']
+                obj_text = rel['object_text']
+                predicate = rel['predicate']
+                confidence = rel.get('confidence', 1.0)
+                subj_label = rel['subject_label']
+                obj_label = rel['object_label']
             
-            # Use normalized text if available
-            subj_text = subject.get('normalized_text', subject['text'])
-            obj_text = obj.get('normalized_text', obj['text'])
-            
-            # Determine node types
-            subj_label = subject['label']
-            obj_label = obj['label']
-            
-            # Gene nodes (subjects should typically be genes)
-            if subj_label in ['GENE', 'PROTEIN']:
+            # Gene nodes (subjects should typically be genes, but may be classified as chemicals)
+            if subj_label in ['GENE', 'PROTEIN', 'CHEMICAL']:
                 gene_nodes.add(subj_text)
             
             # Function nodes (objects should be functions/diseases/chemicals)
@@ -90,11 +98,23 @@ class GraphBuilder:
             if not G.has_edge(subj_text, obj_text):
                 G.add_edge(subj_text, obj_text, 
                           weight=0, 
-                          predicates=[], 
-                          relations=[])
+                          predicates="", 
+                          relations="")
             
-            G[subj_text][obj_text]['predicates'].append(predicate)
-            G[subj_text][obj_text]['relations'].append(rel)
+            # Append predicates as comma-separated string
+            current_predicates = G[subj_text][obj_text]['predicates']
+            if current_predicates:
+                G[subj_text][obj_text]['predicates'] = current_predicates + "," + predicate
+            else:
+                G[subj_text][obj_text]['predicates'] = predicate
+            
+            # Store relation count instead of full relation objects
+            current_relations = G[subj_text][obj_text]['relations']
+            if current_relations:
+                relation_count = int(current_relations.split(',')[0]) + 1
+            else:
+                relation_count = 1
+            G[subj_text][obj_text]['relations'] = f"{relation_count},confidence:{confidence}"
         
         # Set final edge weights
         for (u, v), weight in edge_weights.items():
@@ -167,7 +187,7 @@ class GraphBuilder:
                 weight += 1.0 / (1 + func_degree)  # Rarer functions get higher weight
             
             data['weight'] = weight
-            data['shared_functions'] = shared_functions
+            data['shared_functions'] = ",".join(shared_functions) if shared_functions else ""
         
         logger.info(f"Created gene projection with {gene_graph.number_of_nodes()} nodes and {gene_graph.number_of_edges()} edges")
         return gene_graph
@@ -203,7 +223,7 @@ class GraphBuilder:
             # Weight by number of shared genes
             weight = len(shared_genes)
             data['weight'] = weight
-            data['shared_genes'] = shared_genes
+            data['shared_genes'] = ",".join(shared_genes) if shared_genes else ""
         
         logger.info(f"Created function projection with {function_graph.number_of_nodes()} nodes and {function_graph.number_of_edges()} edges")
         return function_graph

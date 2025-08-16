@@ -22,7 +22,7 @@ echo "Starting pipeline update at $(date)"
 
 # Step 1: Download latest GeneRIF data
 echo "Step 1: Downloading GeneRIF data..."
-python -m gene_rif_graph.scripts.download_data \
+python3 -m gene_rif_graph.scripts.download_data \
     --species "$SPECIES" \
     --data-dir "$DATA_DIR/raw" \
     --fetch-abstracts \
@@ -46,7 +46,7 @@ if [ -n "$MAX_TEXTS" ]; then
     EXTRACT_ARGS="$EXTRACT_ARGS --max-texts $MAX_TEXTS"
 fi
 
-python -m gene_rif_graph.scripts.extract_triplets $EXTRACT_ARGS
+python3 -m gene_rif_graph.scripts.extract_triplets $EXTRACT_ARGS
 
 # Check if extraction was successful
 if [ ! -f "$DATA_DIR/processed/relations.csv" ]; then
@@ -58,7 +58,7 @@ echo "✓ Extracted entities and relations"
 
 # Step 3: Build knowledge graph
 echo "Step 3: Building knowledge graph..."
-python -m gene_rif_graph.scripts.build_graph \
+python3 -m gene_rif_graph.scripts.build_graph \
     --relations-file "$DATA_DIR/processed/relations.csv" \
     --output-dir "$DATA_DIR/graphs" \
     --create-projections \
@@ -75,7 +75,7 @@ echo "✓ Built knowledge graphs"
 
 # Step 4: Generate analysis reports
 echo "Step 4: Generating analysis reports..."
-python -m gene_rif_graph.scripts.analyze_graph \
+python3 -m gene_rif_graph.scripts.analyze_graph \
     --graph-file "$DATA_DIR/graphs/bipartite_graph.pkl" \
     --output-dir "$DATA_DIR/graphs" \
     --generate-report \
