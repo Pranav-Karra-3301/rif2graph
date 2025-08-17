@@ -6,7 +6,7 @@ import os
 import logging
 import pickle
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 import spacy
 import scispacy
 from scispacy.linking import EntityLinker
@@ -29,12 +29,12 @@ logger = logging.getLogger(__name__)
 class BioNERExtractor:
     """Biomedical Named Entity Recognition using SciSpaCy."""
     
-    def __init__(self, model_name: str = "en_ner_bc5cdr_md"):
+    def __init__(self, model_name: str = "en_ner_bionlp13cg_md"):
         """
         Initialize NER extractor.
         
         Args:
-            model_name: SciSpaCy model name (e.g., 'en_ner_bc5cdr_md', 'en_ner_bionlp13cg_md')
+            model_name: SciSpaCy model name (en_ner_bionlp13cg_md for genes, en_ner_bc5cdr_md for chemicals/diseases)
         """
         self.model_name = model_name
         self.nlp = None
@@ -70,10 +70,11 @@ class BioNERExtractor:
         doc = self.nlp(text)
         entities = []
         
+        # Extract entities from spaCy NER
         for ent in doc.ents:
             entity_dict = {
                 'text': ent.text,
-                'label': ent.label_,
+                'label': self._normalize_entity_label(ent.label_),
                 'start': ent.start_char,
                 'end': ent.end_char,
                 'umls_id': None
@@ -87,7 +88,117 @@ class BioNERExtractor:
             
             entities.append(entity_dict)
         
+        # Add regex-based gene entities as fallback
+        regex_entities = self._extract_gene_patterns(text)
+        entities.extend(regex_entities)
+        
+        # Remove duplicates (prefer NER over regex)
+        entities = self._deduplicate_entities(entities)
+        
         return entities
+    
+    def _normalize_entity_label(self, label: str) -> str:
+        """Normalize entity labels to standard types."""
+        label_mapping = {
+            'GENE_OR_GENE_PRODUCT': 'GENE',
+            'PROTEIN': 'GENE',
+            'CANCER': 'DISEASE', 
+            'DISEASE_OR_DISORDER': 'DISEASE',
+            'ORGANISM': 'SPECIES',
+            'CELL_TYPE': 'CELL',
+            'CELL_LINE': 'CELL',
+            'ORGAN': 'ANATOMY',
+            'TISSUE': 'ANATOMY',
+            'SIMPLE_CHEMICAL': 'CHEMICAL',
+            'CHEMICAL': 'CHEMICAL',
+            'DRUG': 'CHEMICAL'
+        }
+        return label_mapping.get(label, label)
+    
+    def _extract_gene_patterns(self, text: str) -> List[Dict[str, Any]]:
+        """Extract gene symbols using regex patterns."""
+        import re
+        
+        entities = []
+        
+        # Common gene symbol patterns
+        patterns = [
+            # Standard gene symbols (2-10 uppercase letters, may include numbers)
+            r'\b[A-Z]{2,}[0-9]*[A-Z]*\b',
+            # Gene symbols with numbers/greek letters
+            r'\b[A-Z]+[0-9]+[A-Z]*\b',
+            r'\b[A-Z]+[α-ω]+[0-9]*\b',
+            # Common gene families
+            r'\b(TP53|BRCA[12]|EGFR|MYC|RAS|APC|PTEN|ATM|CHEK[12]|MDM[24])\b',
+            r'\b(CYP[0-9]+[A-Z][0-9]*|UGT[0-9]+[A-Z][0-9]*|NAT[12]|GSTM?[0-9])\b'
+        ]
+        
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                gene_text = match.group()
+                
+                # Filter out common false positives
+                if not self._is_likely_gene(gene_text):
+                    continue
+                
+                entity = {
+                    'text': gene_text,
+                    'label': 'GENE',
+                    'start': match.start(),
+                    'end': match.end(),
+                    'umls_id': None
+                }
+                entities.append(entity)
+        
+        return entities
+    
+    def _is_likely_gene(self, text: str) -> bool:
+        """Filter out false positive gene matches."""
+        # Skip common false positives
+        false_positives = {
+            'DNA', 'RNA', 'ATP', 'ADP', 'GTP', 'GDP', 'NAD', 'NADH', 'FAD', 'FADH',
+            'PCR', 'RT', 'PAGE', 'SDS', 'PBS', 'BSA', 'DMSO', 'EDTA', 'TRIS',
+            'AND', 'OR', 'NOT', 'THE', 'FOR', 'WITH', 'FROM', 'INTO', 'THAT',
+            'ALL', 'ANY', 'CAN', 'MAY', 'WILL', 'ALSO', 'WERE', 'ARE', 'WAS'
+        }
+        
+        if text.upper() in false_positives:
+            return False
+        
+        # Must be 2-15 characters
+        if len(text) < 2 or len(text) > 15:
+            return False
+        
+        # Should contain at least one letter
+        if not any(c.isalpha() for c in text):
+            return False
+        
+        return True
+    
+    def _deduplicate_entities(self, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove duplicate entities, preferring NER over regex."""
+        seen = set()
+        deduplicated = []
+        
+        # Sort to prioritize NER entities (they don't have 'regex' source)
+        entities.sort(key=lambda x: ('regex' in x.get('source', ''), x['start']))
+        
+        for entity in entities:
+            # Create overlap key based on text span
+            start, end = entity['start'], entity['end']
+            
+            # Check for overlaps with existing entities
+            overlaps = False
+            for seen_start, seen_end in seen:
+                if (start < seen_end and end > seen_start):  # Overlap detected
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                seen.add((start, end))
+                deduplicated.append(entity)
+        
+        return deduplicated
     
     def batch_extract_entities(self, texts: List[str]) -> List[List[Dict[str, Any]]]:
         """Extract entities from multiple texts."""
@@ -118,15 +229,15 @@ class BioNERExtractor:
 
 
 class RelationExtractor:
-    """Biomedical relation extraction using BioBERT or REBEL."""
+    """Biomedical relation extraction using REBEL or pattern-based methods."""
     
-    def __init__(self, model_name: str = "dmis-lab/biobert-base-cased-v1.1", 
+    def __init__(self, model_name: str = "Babelscape/rebel-large", 
                  device: str = "auto"):
         """
         Initialize relation extractor.
         
         Args:
-            model_name: HuggingFace model name
+            model_name: HuggingFace model name (default: REBEL for relation extraction)
             device: Device to use ('auto', 'cpu', 'cuda')
         """
         self.model_name = model_name
@@ -145,34 +256,26 @@ class RelationExtractor:
     def _load_model(self):
         """Load the relation extraction model."""
         try:
-            # For BioBERT-based relation extraction
-            if "biobert" in self.model_name.lower():
-                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
-                self.model.to(self.device)
-                logger.info(f"Loaded BioBERT model: {self.model_name} on {self.device}")
-            
-            # For REBEL or other seq2seq models
-            elif "rebel" in self.model_name.lower():
+            # For REBEL relation extraction (preferred)
+            if "rebel" in self.model_name.lower():
                 self.pipeline = pipeline(
                     "text2text-generation", 
                     model=self.model_name,
-                    device=0 if self.device == "cuda" else -1
+                    device=0 if self.device == "cuda" else -1,
+                    max_length=256,
+                    do_sample=False
                 )
                 logger.info(f"Loaded REBEL model: {self.model_name} on {self.device}")
             
             else:
-                # Generic relation extraction pipeline
-                self.pipeline = pipeline(
-                    "text-classification",
-                    model=self.model_name,
-                    device=0 if self.device == "cuda" else -1
-                )
-                logger.info(f"Loaded RE model: {self.model_name} on {self.device}")
+                # Fallback to pattern-based extraction
+                logger.warning(f"Model {self.model_name} not recognized, using pattern-based extraction")
+                self.pipeline = None
                 
         except Exception as e:
             logger.error(f"Error loading model {self.model_name}: {e}")
-            raise
+            logger.warning("Falling back to pattern-based relation extraction")
+            self.pipeline = None
     
     def extract_relations(self, text: str, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -205,32 +308,31 @@ class RelationExtractor:
     def _extract_relation_pair(self, text: str, ent1: Dict, ent2: Dict) -> Optional[Dict[str, Any]]:
         """Extract relation between a pair of entities."""
         try:
-            # Create context window around entities
+            # Create context window around entities  
             start_pos = min(ent1['start'], ent2['start'])
             end_pos = max(ent1['end'], ent2['end'])
             
-            # Expand context
-            context_start = max(0, start_pos - 100)
-            context_end = min(len(text), end_pos + 100)
+            # Expand context but keep it manageable for REBEL
+            context_start = max(0, start_pos - 50)
+            context_end = min(len(text), end_pos + 50)
             context = text[context_start:context_end]
             
-            # Mark entities in context
-            marked_text = self._mark_entities_in_text(context, ent1, ent2, context_start)
-            
-            if self.pipeline and "rebel" in self.model_name.lower():
+            if self.pipeline:
                 # Use REBEL for relation extraction
-                result = self.pipeline(marked_text, max_length=512, num_return_sequences=1)
-                if result and result[0]['generated_text']:
-                    return self._parse_rebel_output(result[0]['generated_text'], ent1, ent2)
+                try:
+                    result = self.pipeline(context, max_length=256, num_return_sequences=1)
+                    if result and len(result) > 0:
+                        rebel_relation = self._parse_rebel_output(result[0]['generated_text'], ent1, ent2, context)
+                        if rebel_relation:
+                            return rebel_relation
+                except Exception as e:
+                    logger.debug(f"REBEL extraction failed: {e}")
             
-            else:
-                # Use BioBERT or other models for relation classification
-                # This would require a fine-tuned model for relation classification
-                # For now, we'll use a simple heuristic-based approach
-                return self._heuristic_relation_extraction(text, ent1, ent2)
+            # Fallback to pattern-based extraction
+            return self._heuristic_relation_extraction(context, ent1, ent2)
             
         except Exception as e:
-            logger.warning(f"Error extracting relation between {ent1['text']} and {ent2['text']}: {e}")
+            logger.debug(f"Error extracting relation between {ent1['text']} and {ent2['text']}: {e}")
             return None
     
     def _mark_entities_in_text(self, text: str, ent1: Dict, ent2: Dict, offset: int) -> str:
@@ -255,88 +357,273 @@ class RelationExtractor:
         
         return text
     
-    def _parse_rebel_output(self, output: str, ent1: Dict, ent2: Dict) -> Optional[Dict[str, Any]]:
+    def _parse_rebel_output(self, output: str, ent1: Dict, ent2: Dict, context: str) -> Optional[Dict[str, Any]]:
         """Parse REBEL model output to extract relations."""
-        # REBEL outputs relations in a specific format
-        # This is a simplified parser - would need refinement for production
         try:
+            # REBEL outputs format: <triplet> subject <subj> predicate <pred> object <obj>
             if "<triplet>" in output:
                 triplets = output.split("<triplet>")[1:]
                 for triplet in triplets:
-                    parts = triplet.split("<subj>")[1].split("<obj>")
-                    if len(parts) >= 2:
-                        subj_rel = parts[0].split("<pred>")
-                        if len(subj_rel) >= 2:
-                            subject = subj_rel[0].strip()
-                            predicate = subj_rel[1].strip()
-                            object_text = parts[1].strip()
+                    # Clean up the triplet
+                    triplet = triplet.strip()
+                    
+                    # Parse using regex for more robust extraction
+                    import re
+                    pattern = r'(.+?)<subj>(.+?)<pred>(.+?)<obj>(.+?)(?=<triplet>|$)'
+                    matches = re.findall(pattern, triplet)
+                    
+                    if matches:
+                        _, subject, predicate, object_text = matches[0]
+                        subject = subject.strip()
+                        predicate = predicate.strip()
+                        object_text = object_text.strip()
+                        
+                        # Match extracted entities to our input entities
+                        subj_ent, obj_ent = self._match_entities_to_triplet(
+                            subject, object_text, ent1, ent2, context
+                        )
+                        
+                        if subj_ent and obj_ent and predicate:
+                            return {
+                                'subject': subj_ent,
+                                'predicate': predicate.replace(' ', '_').lower(),
+                                'object': obj_ent,
+                                'confidence': 0.8
+                            }
                             
-                            # Check if this triplet matches our entities
-                            if (subject.lower() in ent1['text'].lower() or 
-                                subject.lower() in ent2['text'].lower()):
-                                return {
-                                    'subject': ent1,
-                                    'predicate': predicate,
-                                    'object': ent2,
-                                    'confidence': 0.8  # Default confidence
-                                }
         except Exception as e:
-            logger.warning(f"Error parsing REBEL output: {e}")
+            logger.debug(f"Error parsing REBEL output: {e}")
+        
+        return None
+    
+    def _match_entities_to_triplet(self, subj_text: str, obj_text: str, 
+                                 ent1: Dict, ent2: Dict, context: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """Match REBEL-extracted entities to our NER entities."""
+        entities = [ent1, ent2]
+        
+        # Calculate similarity scores
+        def text_similarity(text1: str, text2: str) -> float:
+            text1_lower = text1.lower().strip()
+            text2_lower = text2.lower().strip()
+            
+            # Exact match
+            if text1_lower == text2_lower:
+                return 1.0
+            
+            # Substring match
+            if text1_lower in text2_lower or text2_lower in text1_lower:
+                return 0.8
+            
+            # Word overlap
+            words1 = set(text1_lower.split())
+            words2 = set(text2_lower.split())
+            if words1 & words2:
+                return len(words1 & words2) / max(len(words1), len(words2))
+            
+            return 0.0
+        
+        # Find best matches
+        best_subj = None
+        best_obj = None
+        best_subj_score = 0.5  # Minimum threshold
+        best_obj_score = 0.5
+        
+        for ent in entities:
+            subj_score = text_similarity(subj_text, ent['text'])
+            obj_score = text_similarity(obj_text, ent['text'])
+            
+            if subj_score > best_subj_score:
+                best_subj = ent
+                best_subj_score = subj_score
+            
+            if obj_score > best_obj_score and ent != best_subj:
+                best_obj = ent
+                best_obj_score = obj_score
+        
+        return best_subj, best_obj
+    
+    def _extract_dependency_relation(self, text: str, ent1: Dict, ent2: Dict) -> Optional[Dict[str, Any]]:
+        """Extract relations using dependency parsing."""
+        try:
+            # Use a simple English model for dependency parsing
+            import spacy
+            nlp_simple = spacy.load('en_core_web_sm')
+            doc = nlp_simple(text)
+            
+            # Find tokens corresponding to entities
+            ent1_tokens = self._find_entity_tokens(doc, ent1)
+            ent2_tokens = self._find_entity_tokens(doc, ent2)
+            
+            if not ent1_tokens or not ent2_tokens:
+                return None
+            
+            # Look for dependency paths between entities
+            for token1 in ent1_tokens:
+                for token2 in ent2_tokens:
+                    relation = self._analyze_dependency_path(token1, token2)
+                    if relation:
+                        return relation
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Dependency parsing failed: {e}")
+            return None
+    
+    def _find_entity_tokens(self, doc, entity: Dict) -> List:
+        """Find spaCy tokens corresponding to an entity."""
+        tokens = []
+        start_char = entity['start']
+        end_char = entity['end']
+        
+        for token in doc:
+            if token.idx >= start_char and token.idx + len(token.text) <= end_char:
+                tokens.append(token)
+        
+        return tokens
+    
+    def _analyze_dependency_path(self, token1, token2) -> Optional[Dict[str, Any]]:
+        """Analyze dependency path between two tokens."""
+        # Common dependency patterns for biological relations
+        patterns = {
+            # Direct object relations
+            'associated': {'predicate': 'associated_with', 'confidence': 0.8},
+            'linked': {'predicate': 'associated_with', 'confidence': 0.8}, 
+            'related': {'predicate': 'associated_with', 'confidence': 0.6},
+            'involved': {'predicate': 'involved_in', 'confidence': 0.8},
+            'regulates': {'predicate': 'regulates', 'confidence': 0.8},
+            'activates': {'predicate': 'activates', 'confidence': 0.8},
+            'inhibits': {'predicate': 'inhibits', 'confidence': 0.8},
+            'causes': {'predicate': 'causes', 'confidence': 0.8},
+            'mutated': {'predicate': 'mutated_in', 'confidence': 0.7},
+            'expresses': {'predicate': 'expresses', 'confidence': 0.7},
+        }
+        
+        # Find connecting verbs/relations
+        path = []
+        current = token1
+        visited = set()
+        
+        # Traverse dependency tree to find connection
+        while current and current != token2 and len(path) < 5:
+            if current in visited:
+                break
+            visited.add(current)
+            path.append(current)
+            
+            # Check if current token indicates a relation
+            lemma = current.lemma_.lower()
+            if lemma in patterns:
+                return patterns[lemma]
+            
+            # Move to head or children
+            if current.head != current:
+                current = current.head
+            else:
+                break
         
         return None
     
     def _heuristic_relation_extraction(self, text: str, ent1: Dict, ent2: Dict) -> Optional[Dict[str, Any]]:
-        """Simple heuristic-based relation extraction."""
-        # Define common biomedical relation patterns
-        gene_labels = {'GENE', 'PROTEIN'}
+        """Enhanced heuristic-based relation extraction."""
+        # Define entity type mappings (include CHEMICAL as potential gene)
+        gene_labels = {'GENE', 'PROTEIN', 'CHEMICAL'}  # Many genes misclassified as CHEMICAL
         disease_labels = {'DISEASE', 'DISORDER'}
         chemical_labels = {'CHEMICAL', 'DRUG'}
+        function_labels = {'FUNCTION', 'PROCESS', 'PATHWAY', 'CELLULAR_COMPONENT', 'MOLECULAR_FUNCTION'}
         
         ent1_label = ent1['label']
         ent2_label = ent2['label']
         
-        # Gene-Disease relations
-        if ((ent1_label in gene_labels and ent2_label in disease_labels) or
-            (ent1_label in disease_labels and ent2_label in gene_labels)):
-            
-            subject = ent1 if ent1_label in gene_labels else ent2
-            object_ent = ent2 if ent1_label in gene_labels else ent1
-            
-            # Look for relation keywords in context
-            context = text[min(ent1['start'], ent2['start']):max(ent1['end'], ent2['end'])]
-            context_lower = context.lower()
-            
-            if any(word in context_lower for word in ['associated', 'linked', 'implicated']):
-                predicate = 'associated_with'
-            elif any(word in context_lower for word in ['causes', 'leads to', 'results in']):
-                predicate = 'causes'
-            elif any(word in context_lower for word in ['treats', 'therapy', 'treatment']):
-                predicate = 'treats'
-            else:
-                predicate = 'related_to'
-            
-            return {
-                'subject': subject,
-                'predicate': predicate,
-                'object': object_ent,
-                'confidence': 0.6  # Lower confidence for heuristic
-            }
+        # Get full text context
+        context_lower = text.lower()
         
-        # Chemical-Disease relations
-        elif ((ent1_label in chemical_labels and ent2_label in disease_labels) or
-              (ent1_label in disease_labels and ent2_label in chemical_labels)):
+        # Pattern matching for relations
+        relation_patterns = {
+            'involved_in': ['involved in', 'plays a role in', 'participates in', 'functions in', 'role in'],
+            'regulates': ['regulates', 'controls', 'modulates', 'affects', 'influences'],
+            'associated_with': ['associated with', 'linked to', 'related to', 'implicated in', 'correlated with'],
+            'causes': ['causes', 'leads to', 'results in', 'induces', 'triggers'],
+            'inhibits': ['inhibits', 'suppresses', 'blocks', 'prevents', 'reduces'],
+            'activates': ['activates', 'stimulates', 'enhances', 'promotes', 'increases'],
+            'encodes': ['encodes', 'codes for', 'gene product', 'protein product'],
+            'treats': ['treats', 'therapeutic', 'therapy', 'treatment', 'drug for'],
+            'expresses': ['expresses', 'expression', 'expressed in', 'transcribed'],
+            'mutated_in': ['mutations', 'mutated', 'variant', 'polymorphism'],
+        }
+        
+        # Find the best matching predicate
+        best_predicate = None
+        best_confidence = 0.2
+        
+        # First try linguistic pattern matching
+        linguistic_relation = self._extract_dependency_relation(text, ent1, ent2)
+        if linguistic_relation:
+            best_predicate = linguistic_relation['predicate']
+            best_confidence = linguistic_relation['confidence']
+        
+        # Then try keyword patterns
+        if not best_predicate or best_confidence < 0.6:
+            for predicate, patterns in relation_patterns.items():
+                for pattern in patterns:
+                    if pattern in context_lower:
+                        confidence = 0.7  # Higher confidence for pattern match
+                        if confidence > best_confidence:
+                            best_predicate = predicate
+                            best_confidence = confidence
+                            break
+        
+        # Default predicate if no pattern found but entities are compatible
+        if not best_predicate:
+            # Gene-Function/Process relations (very common in GeneRIF)
+            if ((ent1_label in gene_labels and ent2_label in function_labels) or
+                (ent1_label in function_labels and ent2_label in gene_labels)):
+                best_predicate = 'involved_in'
+                best_confidence = 0.4
             
-            subject = ent1 if ent1_label in chemical_labels else ent2
-            object_ent = ent2 if ent1_label in chemical_labels else ent1
+            # Gene-Disease relations  
+            elif ((ent1_label in gene_labels and ent2_label in disease_labels) or
+                  (ent1_label in disease_labels and ent2_label in gene_labels)):
+                best_predicate = 'associated_with'
+                best_confidence = 0.4
+                
+            # Chemical-Disease relations
+            elif ((ent1_label in chemical_labels and ent2_label in disease_labels) or
+                  (ent1_label in disease_labels and ent2_label in chemical_labels)):
+                best_predicate = 'associated_with'
+                best_confidence = 0.3
+            
+            # Any other entity pairs - still extract with low confidence
+            elif ent1_label != ent2_label:
+                best_predicate = 'related_to'
+                best_confidence = 0.25
+        
+        if best_predicate and best_confidence >= 0.2:
+            # Determine subject/object based on entity types and order
+            subject, object_ent = self._determine_subject_object(ent1, ent2, gene_labels)
             
             return {
                 'subject': subject,
-                'predicate': 'treats',
+                'predicate': best_predicate,
                 'object': object_ent,
-                'confidence': 0.5
+                'confidence': best_confidence
             }
         
         return None
+    
+    def _determine_subject_object(self, ent1: Dict, ent2: Dict, gene_labels: Set[str]) -> Tuple[Dict, Dict]:
+        """Determine which entity should be subject vs object."""
+        # Prefer genes/proteins as subjects when possible
+        if ent1['label'] in gene_labels and ent2['label'] not in gene_labels:
+            return ent1, ent2
+        elif ent2['label'] in gene_labels and ent1['label'] not in gene_labels:
+            return ent2, ent1
+        else:
+            # Default to order in text (first entity as subject)
+            if ent1['start'] < ent2['start']:
+                return ent1, ent2
+            else:
+                return ent2, ent1
     
     def batch_extract_relations(self, texts: List[str], 
                               entities_list: List[List[Dict[str, Any]]]) -> List[List[Dict[str, Any]]]:

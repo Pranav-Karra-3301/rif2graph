@@ -24,12 +24,12 @@ logger = logging.getLogger(__name__)
 @click.command()
 @click.option('--input-file', required=True, help='Input CSV file with GeneRIF data')
 @click.option('--output-dir', default='./data/processed', help='Output directory')
-@click.option('--ner-model', default='en_ner_bc5cdr_md', help='SciSpaCy NER model')
-@click.option('--re-model', default='dmis-lab/biobert-base-cased-v1.1', help='Relation extraction model')
+@click.option('--ner-model', default='en_ner_bionlp13cg_md', help='SciSpaCy NER model')
+@click.option('--re-model', default='Babelscape/rebel-large', help='Relation extraction model')
 @click.option('--device', default='auto', help='Device to use (auto/cpu/cuda)')
 @click.option('--batch-size', default=100, type=int, help='Batch size for processing')
 @click.option('--max-texts', type=int, help='Maximum number of texts to process (for testing)')
-@click.option('--min-confidence', default=0.5, type=float, help='Minimum relation confidence')
+@click.option('--min-confidence', default=0.2, type=float, help='Minimum relation confidence')
 @click.option('--normalize-genes', is_flag=True, help='Normalize gene identifiers')
 @click.option('--normalize-concepts', is_flag=True, help='Normalize biomedical concepts')
 @click.option('--filter-gene-gene', is_flag=True, default=True, help='Filter gene-gene relations')
@@ -69,6 +69,10 @@ def main(input_file, output_dir, ner_model, re_model, device, batch_size, max_te
         logger.info("Extracting biomedical entities...")
         entities_list = ner_extractor.batch_extract_entities(texts)
         
+        # Checkpoint: Entity extraction stats
+        total_entities = sum(len(ents) for ents in entities_list)
+        logger.info(f"CHECKPOINT: Extracted {total_entities} entities from {len(texts)} texts ({total_entities/len(texts):.1f} entities/text)")
+        
         # Save entities
         entities_file = output_dir / "entities.pkl"
         with open(entities_file, 'wb') as f:
@@ -78,6 +82,10 @@ def main(input_file, output_dir, ner_model, re_model, device, batch_size, max_te
         # Extract relations
         logger.info("Extracting relations...")
         relations_list = re_extractor.batch_extract_relations(texts, entities_list)
+        
+        # Checkpoint: Raw relation extraction stats
+        total_raw_relations = sum(len(rels) for rels in relations_list)
+        logger.info(f"CHECKPOINT: Extracted {total_raw_relations} raw relations from {len(texts)} texts ({total_raw_relations/len(texts):.1f} relations/text)")
         
         # Flatten relations list
         all_relations = []
@@ -89,7 +97,7 @@ def main(input_file, output_dir, ner_model, re_model, device, batch_size, max_te
                     rel['gene_id'] = df.iloc[i]['gene_id']
                 all_relations.append(rel)
         
-        logger.info(f"Extracted {len(all_relations)} relations")
+        logger.info(f"CHECKPOINT: Flattened to {len(all_relations)} total relations")
         
         # Apply filters
         logger.info("Applying filters...")
@@ -99,14 +107,24 @@ def main(input_file, output_dir, ner_model, re_model, device, batch_size, max_te
         )
         quality_filter = QualityFilter()
         
-        # Filter relations
+        # Filter relations with checkpoints
+        logger.info(f"CHECKPOINT: Before confidence filter: {len(all_relations)} relations")
         filtered_relations = triple_filter.filter_triplets(all_relations)
+        logger.info(f"CHECKPOINT: After TripleFilter: {len(filtered_relations)} relations ({len(filtered_relations)/len(all_relations)*100:.1f}% retention)")
+        
         filtered_relations = quality_filter.apply_quality_filters(filtered_relations)
+        logger.info(f"CHECKPOINT: After QualityFilter: {len(filtered_relations)} relations")
         
         # Normalize predicates
         filtered_relations = triple_filter.normalize_predicates(filtered_relations)
         
-        logger.info(f"After filtering: {len(filtered_relations)} relations")
+        logger.info(f"CHECKPOINT: Final relations after all processing: {len(filtered_relations)} relations")
+        
+        # Check for concerning drop rates
+        if len(all_relations) > 0:
+            retention_rate = len(filtered_relations) / len(all_relations)
+            if retention_rate < 0.1:
+                logger.warning(f"WARNING: Very low retention rate ({retention_rate*100:.1f}%) - filters may be too aggressive!")
         
         # Initialize normalizers if requested
         gene_normalizer = None

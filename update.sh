@@ -43,7 +43,10 @@ EXTRACT_ARGS="--input-file $DATA_DIR/processed/generifs_processed.csv --output-d
 
 # Add max-texts limit if specified (useful for testing)
 if [ -n "$MAX_TEXTS" ]; then
+    echo "⚠️  Processing limited to $MAX_TEXTS texts for testing"
     EXTRACT_ARGS="$EXTRACT_ARGS --max-texts $MAX_TEXTS"
+else
+    echo "📄 Processing full dataset (no MAX_TEXTS limit set)"
 fi
 
 python3 -m gene_rif_graph.scripts.extract_triplets $EXTRACT_ARGS
