@@ -1,7 +1,6 @@
 # Gene-RIF to Graph Pipeline
 
 [![Tests](https://github.com/Pranav-Karra-3301/rif2graph/actions/workflows/tests.yml/badge.svg)](https://github.com/Pranav-Karra-3301/rif2graph/actions/workflows/tests.yml)
-[![Update Graph](https://github.com/Pranav-Karra-3301/rif2graph/actions/workflows/update-graph.yml/badge.svg)](https://github.com/Pranav-Karra-3301/rif2graph/actions/workflows/update-graph.yml)
 
 A comprehensive bioinformatics pipeline that converts GeneRIFs (Gene References Into Function) to knowledge graphs using biomedical NLP and graph analysis techniques.
 
